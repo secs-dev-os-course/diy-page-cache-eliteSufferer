@@ -482,7 +482,7 @@ void test_read_after_write() {
         return;
     }
 
-    // Перемещаемся в начало файла (выровненная позиция)
+    // Перемещаемся в начало файла
     lab2_lseek(fd, 0, SEEK_SET);
 
     // Записываем данные
@@ -493,15 +493,29 @@ void test_read_after_write() {
         std::cout << "Записано через кэш: " << bytes_written << " байт." << std::endl;
     }
 
-    // Возвращаемся в начало блока (выровненная позиция)
+    // Синхронизируем данные с диском
+    if (lab2_fsync(fd) == -1) {
+        std::cerr << "Ошибка синхронизации с диском" << std::endl;
+        lab2_close(fd);
+        return;
+    }
+
+    // Возвращаемся в начало файла
     lab2_lseek(fd, 0, SEEK_SET);
 
     // Читаем данные обратно
-    char read_buffer[BLOCK_SIZE] = {0};  // Используем буфер размером с блок
-    ssize_t bytes_read = lab2_read(fd, read_buffer, BLOCK_SIZE);
+    char read_buffer[BLOCK_SIZE] = {0};
+    ssize_t bytes_read = lab2_read(fd, read_buffer, write_size); // Читаем столько же байт, сколько записали
     if (bytes_read != -1) {
         std::cout << "Прочитано после записи: " << bytes_read << " байт." << std::endl;
         std::cout << "Данные: " << read_buffer << std::endl;
+
+        // Проверяем корректность прочитанных данных
+        if (strncmp(write_data, read_buffer, write_size) == 0) {
+            std::cout << "Данные совпадают!" << std::endl;
+        } else {
+            std::cerr << "Ошибка: данные не совпадают!" << std::endl;
+        }
     }
 
     lab2_close(fd);
@@ -565,29 +579,27 @@ void test_optimal_evict() {
 //     test_open_close();
 //     test_read_write();
 //     test_block_cache();
-//     // test_cache_integration();
 //     test_read_after_write();
-//     // // debug_cache();
 //     test_optimal_evict();
 //
 //     return 0;
 // }
 
-int main() {
-    SetConsoleOutputCP(CP_UTF8);
-    std::cout << "Select operation:\n";
-    std::cout << "1. Run Substring Search without Cache\n";
-    std::cout << "2. Run Substring Search with Cache\n";
-    int choice;
-    std::cin >> choice;
-
-    if (choice == 1) {
-        runSubstringSearchWithoutCache();
-    } else if (choice == 2) {
-        runSubstringSearchWithCache();
-    } else {
-        std::cout << "Invalid choice.\n";
-    }
-
-    return 0;
-}
+// int main() {
+//     SetConsoleOutputCP(CP_UTF8);
+//     std::cout << "Select operation:\n";
+//     std::cout << "1. Run Substring Search without Cache\n";
+//     std::cout << "2. Run Substring Search with Cache\n";
+//     int choice;
+//     std::cin >> choice;
+//
+//     if (choice == 1) {
+//         runSubstringSearchWithoutCache();
+//     } else if (choice == 2) {
+//         runSubstringSearchWithCache();
+//     } else {
+//         std::cout << "Invalid choice.\n";
+//     }
+//
+//     return 0;
+// }
