@@ -62,7 +62,7 @@ void SubstringSearch(const std::string& filename, const std::string& substring, 
 void runSubstringSearchWithoutCache() {
     std::string filename = "large_text_file.txt";  // Имя файла для поиска
     std::string substring = "example";        // Подстрока для поиска
-    int repetitions = 1;                         // Количество повторений
+    int repetitions = 100;                         // Количество повторений
 
     std::cout << "Running Substring Search without Cache:\n";
     std::cout << "File: " << filename << "\n";
