@@ -3,6 +3,8 @@
 
 #include <cstddef>
 #include <iostream>
+
+off_t get_file_size(int fd);
 // Открытие файла по заданному пути
 int lab2_open(const char *path);
 

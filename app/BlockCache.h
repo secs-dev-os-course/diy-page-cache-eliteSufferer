@@ -6,7 +6,7 @@
 #include <memory>
 #include <cstddef>
 
-constexpr size_t BLOCK_SIZE = 4096; // Размер одной страницы
+constexpr size_t BLOCK_SIZE = 512; // Размер одной страницы
 
 // Структура для представления страницы в кэше
 struct CachePage {

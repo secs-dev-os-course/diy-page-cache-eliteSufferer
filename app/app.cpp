@@ -3,36 +3,58 @@
 #include <unordered_map>
 #include <vector>
 #include "BlockCache.h"
-#include "LinearRegression.h"
+#include "SubstringSearch.h"
 
+struct FileDescriptor {
+    HANDLE handle;
+    off_t offset;
+};
 
 // Таблица открытых файлов
-static std::unordered_map<int, HANDLE> file_table;
+static std::unordered_map<int, FileDescriptor> file_table;
 static int next_fd = 1; // Следующий доступный пользовательский дескриптор
 
 constexpr size_t CACHE_SIZE = 10; // Максимальное количество страниц в кэше
 BlockCache cache(CACHE_SIZE);     // Глобальный кэш
 
+off_t get_file_size(int fd) {
+    auto it = file_table.find(fd);
+    if (it == file_table.end()) {
+        std::cerr << "Ошибка: некорректный дескриптор файла " << fd << std::endl;
+        return -1;
+    }
+
+    HANDLE file_handle = it->second.handle;
+    LARGE_INTEGER size;
+
+    if (!GetFileSizeEx(file_handle, &size)) {
+        DWORD error = GetLastError();
+        std::cerr << "Ошибка получения размера файла: " << error << std::endl;
+        return -1;
+    }
+
+    return static_cast<off_t>(size.QuadPart);
+}
+
 // Открытие файла
 int lab2_open(const char* path) {
     HANDLE file_handle = CreateFile(
         path,
-        GENERIC_READ | GENERIC_WRITE, // Чтение и запись
-        FILE_SHARE_READ | FILE_SHARE_WRITE, // Общий доступ
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr,
-        OPEN_EXISTING, // Открыть существующий файл
-        FILE_ATTRIBUTE_NORMAL, // Убираем FILE_FLAG_NO_BUFFERING
+        OPEN_EXISTING,
+        FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,  // Убран FILE_FLAG_OVERLAPPED
         nullptr
     );
 
     if (file_handle == INVALID_HANDLE_VALUE) {
-        std::cerr << "Ошибка: невозможно открыть файл " << path
-                  << ", код ошибки: " << GetLastError() << std::endl;
+        std::cerr << "Error: Unable to open file " << path << ", error code: " << GetLastError() << std::endl;
         return -1;
     }
 
     int fd = next_fd++;
-    file_table[fd] = file_handle;
+    file_table[fd] = {file_handle, 0};
     return fd;
 }
 
@@ -41,19 +63,18 @@ int lab2_open(const char* path) {
 int lab2_close(int fd) {
     auto it = file_table.find(fd);
     if (it == file_table.end()) {
-        std::cerr << "Ошибка: некорректный дескриптор файла " << fd << std::endl;
+        std::cerr << "Error: Invalid file descriptor " << fd << std::endl;
         return -1;
     }
 
-    if (!CloseHandle(it->second)) {
-        std::cerr << "Ошибка: невозможно закрыть файл, код ошибки: " << GetLastError() << std::endl;
+    if (!CloseHandle(it->second.handle)) {
+        std::cerr << "Error: Unable to close file, error code: " << GetLastError() << std::endl;
         return -1;
     }
 
     file_table.erase(it);
     return 0;
 }
-
 
 off_t lab2_lseek(int fd, off_t offset, int whence) {
     auto it = file_table.find(fd);
@@ -62,30 +83,46 @@ off_t lab2_lseek(int fd, off_t offset, int whence) {
         return -1;
     }
 
-    HANDLE file_handle = it->second;
+    FileDescriptor& fd_struct = it->second;
+    HANDLE file_handle = fd_struct.handle;
 
     LARGE_INTEGER li_offset;
-    li_offset.QuadPart = offset;
-
     LARGE_INTEGER new_position;
     DWORD move_method;
 
     switch (whence) {
-        case SEEK_SET: move_method = FILE_BEGIN; break;
-        case SEEK_CUR: move_method = FILE_CURRENT; break;
-        case SEEK_END: move_method = FILE_END; break;
+        case SEEK_SET:
+            move_method = FILE_BEGIN;
+        li_offset.QuadPart = offset;
+        break;
+        case SEEK_CUR:
+            move_method = FILE_CURRENT;
+        li_offset.QuadPart = offset;
+        break;
+        case SEEK_END:
+            move_method = FILE_END;
+        li_offset.QuadPart = offset;
+        break;
         default:
-            std::cerr << "Ошибка: некорректное значение whence " << whence << std::endl;
+            std::cerr << "Ошибка: некорректное значение whence (" << whence << ")." << std::endl;
         return -1;
+    }
+
+    // Проверка выравнивания смещения только для SEEK_SET и SEEK_CUR
+    if ((whence == SEEK_SET || whence == SEEK_CUR) && li_offset.QuadPart % BLOCK_SIZE != 0) {
+        li_offset.QuadPart = (li_offset.QuadPart / BLOCK_SIZE) * BLOCK_SIZE;
     }
 
     if (!SetFilePointerEx(file_handle, li_offset, &new_position, move_method)) {
-        std::cerr << "Ошибка: невозможно переместить указатель, код ошибки: " << GetLastError() << std::endl;
+        DWORD error_code = GetLastError();
+        std::cerr << "Ошибка: невозможно переместить указатель, код ошибки: " << error_code << std::endl;
         return -1;
     }
 
-    return static_cast<off_t>(new_position.QuadPart);
+    fd_struct.offset = static_cast<off_t>(new_position.QuadPart);
+    return fd_struct.offset;
 }
+
 
 // Чтение данных из файла
 ssize_t lab2_read(int fd, void* buf, size_t count) {
@@ -95,46 +132,40 @@ ssize_t lab2_read(int fd, void* buf, size_t count) {
         return -1;
     }
 
-    HANDLE file_handle = it->second;
-    off_t offset = lab2_lseek(fd, 0, SEEK_CUR); // Получаем текущую позицию
-    size_t bytes_read = 0;
+    FileDescriptor& fd_struct = it->second;
+    HANDLE file_handle = fd_struct.handle;
+    off_t offset = fd_struct.offset;
 
-    while (count > 0) {
-        off_t page_offset = (offset / BLOCK_SIZE) * BLOCK_SIZE; // Смещение страницы
-        size_t page_offset_in_block = offset % BLOCK_SIZE;      // Смещение внутри страницы
+    // Выравниваем размер чтения
+    size_t aligned_count = ((count + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
 
-        std::cout << "Чтение: offset=" << offset
-                  << ", page_offset=" << page_offset
-                  << ", page_offset_in_block=" << page_offset_in_block << std::endl;
+    // Создаем временный буфер для выровненного чтения
+    std::vector<char> temp_buffer(aligned_count);
+    DWORD bytes_read;
 
-        // Получаем или загружаем страницу
-        auto page = cache.get_page(page_offset);
-        if (!page) {
-            page = std::make_shared<CachePage>(page_offset);
-
-            // Загружаем данные с диска
-            lab2_lseek(fd, page_offset, SEEK_SET);
-            DWORD bytes_from_disk = 0;
-            if (!ReadFile(file_handle, page->data.data(), BLOCK_SIZE, &bytes_from_disk, nullptr)) {
-                std::cerr << "Ошибка чтения с диска." << std::endl;
-                return -1;
-            }
-
-            cache.add_page(page); // Добавляем страницу в кэш
+    // Используем синхронное чтение, так как позиция уже установлена через lab2_lseek
+    if (!ReadFile(file_handle, temp_buffer.data(), static_cast<DWORD>(aligned_count),
+                 &bytes_read, nullptr)) {
+        DWORD error = GetLastError();
+        if (error != ERROR_HANDLE_EOF) {
+            std::cerr << "Ошибка чтения файла: " << error << std::endl;
+            return -1;
         }
+                 }
 
-        // Копируем данные из кэша с учётом смещения
-        size_t to_copy = std::min(BLOCK_SIZE - page_offset_in_block, count);
-        memcpy(static_cast<char*>(buf) + bytes_read, &page->data[page_offset_in_block], to_copy);
-
-        bytes_read += to_copy;
-        count -= to_copy;
-        offset += to_copy;
+    if (bytes_read == 0) {
+        return 0;
     }
 
-    return bytes_read;
-}
+    // Копируем только запрошенное количество байт
+    size_t bytes_to_copy = std::min(count, static_cast<size_t>(bytes_read));
+    memcpy(buf, temp_buffer.data(), bytes_to_copy);
 
+    // Обновляем смещение в файле
+    fd_struct.offset += bytes_to_copy;
+
+    return bytes_to_copy;
+}
 
 
 
@@ -146,32 +177,50 @@ ssize_t lab2_write(int fd, const void* buf, size_t count) {
         return -1;
     }
 
-    HANDLE file_handle = it->second;
-    off_t offset = lab2_lseek(fd, 0, SEEK_CUR); // Получаем текущую позицию
+    FileDescriptor& fd_struct = it->second;
+    HANDLE file_handle = fd_struct.handle;
+    off_t offset = fd_struct.offset;
     size_t bytes_written = 0;
 
-    while (count > 0) {
-        off_t page_offset = (offset / BLOCK_SIZE) * BLOCK_SIZE; // Смещение страницы
-        size_t page_offset_in_block = offset % BLOCK_SIZE;      // Смещение внутри страницы
 
-        // Получаем или создаём страницу
-        auto page = cache.get_page(page_offset);
+    while (count > 0) {
+        // Выровненное смещение начала блока
+        off_t block_offset = (offset / BLOCK_SIZE) * BLOCK_SIZE;
+        size_t offset_in_block = offset % BLOCK_SIZE;
+
+        // Размер данных для записи в текущий блок
+        size_t bytes_to_write = std::min(BLOCK_SIZE - offset_in_block, count);
+
+        // Получаем или создаем страницу в кэше
+        auto page = cache.get_page(block_offset);
         if (!page) {
-            page = std::make_shared<CachePage>(page_offset);
-            cache.add_page(page); // Добавляем страницу в кэш
+            page = std::make_shared<CachePage>(block_offset);
+
+            // Если пишем не с начала блока или не весь блок,
+            // нужно сначала прочитать существующие данные
+            if (offset_in_block != 0 || bytes_to_write != BLOCK_SIZE) {
+                OVERLAPPED overlapped = {0};
+                overlapped.Offset = static_cast<DWORD>(block_offset & 0xFFFFFFFF);
+                overlapped.OffsetHigh = static_cast<DWORD>((block_offset >> 32) & 0xFFFFFFFF);
+
+                DWORD bytes_read;
+                ReadFile(file_handle, page->data.data(), BLOCK_SIZE, &bytes_read, &overlapped);
+            }
         }
 
-        // Записываем данные в страницу с учётом смещения
-        size_t to_copy = std::min(BLOCK_SIZE - page_offset_in_block, count);
-        memcpy(&page->data[page_offset_in_block], static_cast<const char*>(buf) + bytes_written, to_copy);
-        page->dirty = true; // Помечаем страницу как "грязную"
+        // Копируем данные в нужную позицию в блоке
+        memcpy(page->data.data() + offset_in_block,
+               static_cast<const char*>(buf) + bytes_written,
+               bytes_to_write);
 
-        bytes_written += to_copy;
-        count -= to_copy;
-        offset += to_copy;
+        page->dirty = true;
+        cache.add_page(page);
+
+        bytes_written += bytes_to_write;
+        count -= bytes_to_write;
+        offset += bytes_to_write;
     }
 
-    lab2_lseek(fd, offset, SEEK_SET); // Обновляем указатель
     return bytes_written;
 }
 
@@ -185,29 +234,34 @@ int lab2_fsync(int fd) {
         return -1;
     }
 
-    HANDLE file_handle = it->second;
+    FileDescriptor& fd_struct = it->second;
+    HANDLE file_handle = fd_struct.handle;
 
     // Сбрасываем все "грязные" страницы на диск
     for (auto& [offset, page] : cache.get_pages()) {
         if (page->dirty) {
-            lab2_lseek(fd, page->offset, SEEK_SET); // Устанавливаем указатель на нужную страницу
+            OVERLAPPED overlapped = {0};
+            overlapped.Offset = static_cast<DWORD>(page->offset & 0xFFFFFFFF);
+            overlapped.OffsetHigh = static_cast<DWORD>((page->offset >> 32) & 0xFFFFFFFF);
+
             DWORD bytes_written = 0;
-            if (!WriteFile(file_handle, page->data.data(), BLOCK_SIZE, &bytes_written, nullptr)) {
+            if (!WriteFile(file_handle, page->data.data(), BLOCK_SIZE, &bytes_written, &overlapped)) {
                 std::cerr << "Ошибка записи на диск, offset = " << page->offset << std::endl;
                 return -1;
             }
-            page->dirty = false; // Страница больше не "грязная"
+            page->dirty = false; // Помечаем страницу как "чистую"
         }
     }
 
-    // Сбрасываем системный буфер
+    // Сбрасываем системный буфер на диск
     if (!FlushFileBuffers(file_handle)) {
-        std::cerr << "Ошибка: сброс буфера диска не удался, код ошибки: " << GetLastError() << std::endl;
+        std::cerr << "Ошибка: сброс буфера ОС не удался, код ошибки: " << GetLastError() << std::endl;
         return -1;
     }
 
     return 0;
 }
+
 
 int lab2_advice(int fd, off_t offset, size_t next_access_time) {
     cache.update_access_hint(offset, next_access_time);
@@ -215,7 +269,7 @@ int lab2_advice(int fd, off_t offset, size_t next_access_time) {
 }
 
 
-// Тестовая функция
+// // Тестовая функция
 void test_open_close() {
     const char* test_file = "test.txt";
 
@@ -259,8 +313,20 @@ void test_read_write() {
 
     std::cout << "Запись прошла успешно: записано " << bytes_written << " байт." << std::endl;
 
+    // Синхронизация данных с диском
+    if (lab2_fsync(fd) == -1) {
+        std::cerr << "Тест провален: синхронизация с диском прошла с ошибкой." << std::endl;
+        lab2_close(fd);
+        return;
+    }
+    std::cout << "Синхронизация с диском прошла успешно." << std::endl;
+
     // Перемотка в начало файла для чтения
-    SetFilePointer(file_table[fd], 0, nullptr, FILE_BEGIN);
+    if (lab2_lseek(fd, 0, SEEK_SET) == -1) {
+        std::cerr << "Тест провален: ошибка перемотки в начало файла." << std::endl;
+        lab2_close(fd);
+        return;
+    }
 
     // Чтение данных
     char read_buffer[64] = {0};
@@ -273,11 +339,23 @@ void test_read_write() {
     }
 
     std::cout << "Чтение прошло успешно: прочитано " << bytes_read << " байт." << std::endl;
-    std::cout << "Данные: " << read_buffer << std::endl;
+    std::cout << "Прочитанные данные: \"" << read_buffer << "\"" << std::endl;
+
+    // Сравнение записанных и прочитанных данных
+    if (strncmp(write_data, read_buffer, bytes_written) != 0) {
+        std::cerr << "Тест провален: данные не совпадают." << std::endl;
+    } else {
+        std::cout << "Тест пройден: данные совпадают." << std::endl;
+    }
 
     // Закрытие файла
-    lab2_close(fd);
+    if (lab2_close(fd) == -1) {
+        std::cerr << "Тест провален: ошибка закрытия файла." << std::endl;
+    } else {
+        std::cout << "Файл успешно закрыт." << std::endl;
+    }
 }
+
 
 void test_lseek_fsync() {
     const char* test_file = "test.txt";
@@ -314,7 +392,7 @@ void test_lseek_fsync() {
     char read_buffer[8] = {0};
     ssize_t bytes_read = lab2_read(fd, read_buffer, 5);
 
-    if (bytes_read != 5 || strcmp(read_buffer, "45678") != 0) {
+    if (bytes_read != 5 || strncmp(read_buffer, "45678", 5) != 0) {
         std::cerr << "Тест провален: данные прочитаны некорректно." << std::endl;
         lab2_close(fd);
         return;
@@ -331,6 +409,7 @@ void test_lseek_fsync() {
     // Закрытие файла
     lab2_close(fd);
 }
+
 
 void test_block_cache() {
     BlockCache cache(3); // Кэш на 3 страницы
@@ -392,54 +471,6 @@ void test_block_cache() {
 }
 
 
-
-
-void test_cache_integration() {
-    const char* test_file = "test_cache.txt";
-
-    // Создаём тестовый файл
-    FILE* f = fopen(test_file, "w");
-    for (int i = 0; i < 1000; ++i) {
-        fprintf(f, "Line %d\n", i);
-    }
-    fclose(f);
-
-    // Открываем файл
-    int fd = lab2_open(test_file);
-    if (fd == -1) {
-        std::cerr << "Ошибка: не удалось открыть файл." << std::endl;
-        return;
-    }
-
-    // Читаем данные через кэш
-    char buffer[128];
-    ssize_t bytes_read = lab2_read(fd, buffer, sizeof(buffer));
-    if (bytes_read != -1) {
-        std::cout << "Прочитано через кэш: " << bytes_read << " байт." << std::endl;
-    }
-
-    // Пишем данные через кэш
-    const char* write_data = "Hello from cache!";
-    ssize_t bytes_written = lab2_write(fd, write_data, strlen(write_data));
-    if (bytes_written != -1) {
-        std::cout << "Записано через кэш: " << bytes_written << " байт." << std::endl;
-    }
-
-    // Синхронизируем данные
-    lab2_fsync(fd);
-
-    // Закрываем файл
-    lab2_close(fd);
-}
-
-void debug_cache() {
-    for (const auto& [offset, page] : cache.get_pages()) {
-        std::cout << "Кэш содержит страницу с offset: " << offset << ", данные: "
-                  << std::string(page->data.data(), BLOCK_SIZE) << std::endl;
-    }
-}
-
-
 void test_read_after_write() {
     const char* test_file = "test_cache.txt";
 
@@ -449,28 +480,23 @@ void test_read_after_write() {
         return;
     }
 
-    // Перемещаемся в конец файла
-    lab2_lseek(fd, 0, SEEK_END);
-    off_t write_offset = lab2_lseek(fd, 0, SEEK_CUR);
-    std::cout << "Указатель файла перед записью: " << write_offset << std::endl;
+    // Перемещаемся в начало файла (выровненная позиция)
+    lab2_lseek(fd, 0, SEEK_SET);
 
     // Записываем данные
     const char* write_data = "Hello from cache!";
-    ssize_t bytes_written = lab2_write(fd, write_data, strlen(write_data));
+    size_t write_size = strlen(write_data);
+    ssize_t bytes_written = lab2_write(fd, write_data, write_size);
     if (bytes_written != -1) {
         std::cout << "Записано через кэш: " << bytes_written << " байт." << std::endl;
     }
 
-    // Проверяем указатель после записи
-    off_t after_write_offset = lab2_lseek(fd, 0, SEEK_CUR);
-    std::cout << "Указатель файла после записи: " << after_write_offset << std::endl;
-
-    // Устанавливаем указатель файла точно на начало записанных данных
-    lab2_lseek(fd, write_offset, SEEK_SET);
+    // Возвращаемся в начало блока (выровненная позиция)
+    lab2_lseek(fd, 0, SEEK_SET);
 
     // Читаем данные обратно
-    char read_buffer[128] = {0};
-    ssize_t bytes_read = lab2_read(fd, read_buffer, bytes_written);
+    char read_buffer[BLOCK_SIZE] = {0};  // Используем буфер размером с блок
+    ssize_t bytes_read = lab2_read(fd, read_buffer, BLOCK_SIZE);
     if (bytes_read != -1) {
         std::cout << "Прочитано после записи: " << bytes_read << " байт." << std::endl;
         std::cout << "Данные: " << read_buffer << std::endl;
@@ -492,48 +518,74 @@ void test_optimal_evict() {
     cache.update_access_hint(0, 100);     // Страница 0 понадобится через 100
     cache.update_access_hint(4096, 200); // Страница 4096 понадобится через 200
 
+    std::cout << "Кэш после добавления первых двух страниц:" << std::endl;
+    for (const auto& [offset, page] : cache.get_pages()) {
+        std::cout << "Страница с offset: " << offset << std::endl;
+    }
+
     // Добавляем новую страницу, должна вытесниться страница с самым поздним доступом
     auto page3 = std::make_shared<CachePage>(8192);
     cache.add_page(page3);
 
-    // Проверяем содержимое кэша
+    std::cout << "Кэш после добавления третьей страницы:" << std::endl;
     for (const auto& [offset, page] : cache.get_pages()) {
-        std::cout << "Кэш содержит страницу с offset: " << offset << std::endl;
+        std::cout << "Страница с offset: " << offset << std::endl;
+    }
+
+    // Проверяем содержимое кэша
+    auto page1_check = cache.get_page(0);
+    auto page2_check = cache.get_page(4096);
+    auto page3_check = cache.get_page(8192);
+
+    if (page1_check) {
+        std::cout << "Страница с offset 0 осталась в кэше." << std::endl;
+    } else {
+        std::cout << "Страница с offset 0 была вытеснена." << std::endl;
+    }
+
+    if (page2_check) {
+        std::cout << "Страница с offset 4096 осталась в кэше." << std::endl;
+    } else {
+        std::cout << "Страница с offset 4096 была вытеснена." << std::endl;
+    }
+
+    if (page3_check) {
+        std::cout << "Страница с offset 8192 успешно добавлена в кэш." << std::endl;
+    } else {
+        std::cout << "Страница с offset 8192 не добавлена в кэш (Ошибка)." << std::endl;
     }
 }
 
 
 
-
-
-// Точка входа
-int main() {
-    SetConsoleOutputCP(CP_UTF8);
-    test_open_close();
-    test_read_write();
-    test_block_cache();
-    test_cache_integration();
-    test_read_after_write();
-    // debug_cache();
-    test_optimal_evict();
-
-    return 0;
-}
-
 // int main() {
 //     SetConsoleOutputCP(CP_UTF8);
-//     // Зашитые параметры
-//     int dataSize = 100;                  // Размер данных для регрессии
-//     int repetitions = 10;                 // Количество повторений в одном прогоне
-//     int numRepetitionsPerLoader = 2;       // Количество прогонов алгоритма
-//
-//     std::cout << "Running Linear Regression with parameters:\n";
-//     std::cout << "Data Size: " << dataSize << "\n";
-//     std::cout << "Repetitions per Run: " << repetitions << "\n";
-//     std::cout << "Number of Runs per Loader: " << numRepetitionsPerLoader << "\n";
-//
-//     // Запуск линейной регрессии через кэш
-//     runLinearRegression(dataSize, repetitions, numRepetitionsPerLoader);
+//     test_open_close();
+//     test_read_write();
+//     test_block_cache();
+//     // test_cache_integration();
+//     test_read_after_write();
+//     // // debug_cache();
+//     test_optimal_evict();
 //
 //     return 0;
 // }
+
+int main() {
+    SetConsoleOutputCP(CP_UTF8);
+    std::cout << "Select operation:\n";
+    std::cout << "1. Run Substring Search without Cache\n";
+    std::cout << "2. Run Substring Search with Cache\n";
+    int choice;
+    std::cin >> choice;
+
+    if (choice == 1) {
+        runSubstringSearchWithoutCache();
+    } else if (choice == 2) {
+        runSubstringSearchWithCache();
+    } else {
+        std::cout << "Invalid choice.\n";
+    }
+
+    return 0;
+}
