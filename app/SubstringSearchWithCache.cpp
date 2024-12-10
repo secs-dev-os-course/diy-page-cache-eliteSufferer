@@ -34,9 +34,20 @@ void SubstringSearchWithCache(const std::string& filename, const std::string& su
         int count = 0;
         off_t current_offset = 0;
 
+        // Размер последнего блока
+        size_t last_block_size = file_size % BLOCK_SIZE;
+        off_t last_block_offset = file_size - last_block_size;
+
         while (current_offset < file_size) {
             // Выравниваем смещение по границе блока
             off_t aligned_offset = (current_offset / BLOCK_SIZE) * BLOCK_SIZE;
+
+            // Определяем размер текущего блока
+            size_t current_block_size = BUFFER_SIZE;
+            if (aligned_offset >= last_block_offset && last_block_size > 0) {
+                // Для последнего неполного блока
+                current_block_size = last_block_size;
+            }
 
             // Устанавливаем позицию для чтения
             if (lab2_lseek(fd, aligned_offset, SEEK_SET) < 0) {
@@ -45,11 +56,11 @@ void SubstringSearchWithCache(const std::string& filename, const std::string& su
             }
 
             // Подсказка кэшу о следующем доступе
-            lab2_advice(fd, aligned_offset, current_offset + BLOCK_SIZE);
+            lab2_advice(fd, aligned_offset, current_offset + current_block_size);
 
             // Читаем блок
-            std::vector<char> buffer(BUFFER_SIZE);
-            ssize_t bytesRead = lab2_read(fd, buffer.data(), BUFFER_SIZE);
+            std::vector<char> buffer(current_block_size);
+            ssize_t bytesRead = lab2_read(fd, buffer.data(), current_block_size);
 
             if (bytesRead < 0) {
                 std::cerr << "Ошибка чтения файла\n";
@@ -57,7 +68,6 @@ void SubstringSearchWithCache(const std::string& filename, const std::string& su
             }
 
             if (bytesRead == 0) {
-                std::cerr << "Достигнут конец файла\n";
                 break;
             }
 
@@ -70,12 +80,22 @@ void SubstringSearchWithCache(const std::string& filename, const std::string& su
             // Обрабатываем overflow для следующего блока
             if (current_offset + bytesRead < file_size) {
                 if (currentBlock.length() >= substring.length()) {
-                    overflow = currentBlock.substr(currentBlock.length() - substring.length() + 1);
-                    currentBlock = currentBlock.substr(0, currentBlock.length() - substring.length() + 1);
+                    // Оставляем для следующего блока на (длина подстроки - 1) символов больше
+                    size_t overlap_size = substring.length() - 1;
+                    if (currentBlock.length() > overlap_size) {
+                        overflow = currentBlock.substr(currentBlock.length() - overlap_size);
+                        currentBlock = currentBlock.substr(0, currentBlock.length() - overlap_size);
+                    } else {
+                        overflow = currentBlock;
+                        currentBlock.clear();
+                    }
                 } else {
                     overflow = currentBlock;
                     currentBlock.clear();
                 }
+            } else {
+                // Для последнего блока не нужен overflow
+                overflow.clear();
             }
 
             // Поиск подстроки в текущем блоке
@@ -83,7 +103,7 @@ void SubstringSearchWithCache(const std::string& filename, const std::string& su
             while ((pos = currentBlock.find(substring, pos)) != std::string::npos) {
                 ++count;
                 std::cout << "Найдено вхождение на позиции: " << current_offset + pos << std::endl;
-                pos += 1;
+                pos += 1; // Двигаемся к следующему возможному вхождению
             }
 
             current_offset += bytesRead;

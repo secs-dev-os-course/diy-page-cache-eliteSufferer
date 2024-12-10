@@ -136,14 +136,16 @@ ssize_t lab2_read(int fd, void* buf, size_t count) {
     HANDLE file_handle = fd_struct.handle;
     off_t offset = fd_struct.offset;
 
-    // Выравниваем размер чтения
-    size_t aligned_count = ((count + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
+    // Выравниваем размер чтения только если это не последний блок
+    size_t aligned_count = count;
+    if (count % BLOCK_SIZE != 0) {
+        aligned_count = ((count + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
+    }
 
     // Создаем временный буфер для выровненного чтения
     std::vector<char> temp_buffer(aligned_count);
     DWORD bytes_read;
 
-    // Используем синхронное чтение, так как позиция уже установлена через lab2_lseek
     if (!ReadFile(file_handle, temp_buffer.data(), static_cast<DWORD>(aligned_count),
                  &bytes_read, nullptr)) {
         DWORD error = GetLastError();
