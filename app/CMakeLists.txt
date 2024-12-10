@@ -1,16 +1,22 @@
 cmake_minimum_required(VERSION 3.12)
-project(app
-        VERSION 0.0.0
-        DESCRIPTION "Application module"
-        LANGUAGES C CXX
+project(BlockCacheLib VERSION 1.0 LANGUAGES CXX)
+
+# Library
+add_library(BlockCache SHARED
+        CacheAPI.cpp
+        BlockCache.cpp
 )
 
-cmake_policy(SET CMP0076 NEW) # avoid warning of relative paths translation
+target_include_directories(BlockCache PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(BlockCache PRIVATE BUILD_DLL)
 
-add_executable(app)
-target_include_directories(app PRIVATE ${CMAKE_SOURCE_DIR})
-
-target_sources(app
-        PRIVATE
-        app.c # or app.cpp
+# App
+add_executable(app
+        SubstringSearchWithCache.cpp
+        SubstringSearchWithoutCache.cpp
+        SubstringSearch.h
+        app.cpp
 )
+
+target_include_directories(app PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(app PRIVATE BlockCache)
