@@ -1,3 +1,4 @@
+// BlockCache.h
 #ifndef BLOCKCACHE_H
 #define BLOCKCACHE_H
 
@@ -5,20 +6,21 @@
 #include <vector>
 #include <memory>
 #include <cstddef>
+#include "Export.h" // Для DLL_EXPORT
 
 constexpr size_t BLOCK_SIZE = 8192; // Размер одной страницы
 
 // Структура для представления страницы в кэше
 struct CachePage {
-    off_t offset;    // Смещение в файле
-    std::vector<char> data; // Данные страницы
-    bool dirty;      // Флаг "грязной" страницы (изменена, но не записана на диск)
+    off_t offset;                 // Смещение в файле
+    std::vector<char> data;       // Данные страницы
+    bool dirty;                   // Флаг "грязной" страницы (изменена, но не записана на диск)
 
     CachePage(off_t off) : offset(off), data(BLOCK_SIZE, 0), dirty(false) {}
 };
 
 // Класс для управления блочным кэшем
-class BlockCache {
+class DLL_EXPORT BlockCache { // Экспортируем класс
 private:
     size_t max_pages; // Максимальное количество страниц в кэше
     std::unordered_map<off_t, std::shared_ptr<CachePage>> pages; // Таблица страниц

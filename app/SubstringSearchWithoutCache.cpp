@@ -7,7 +7,7 @@
 
 // Реализация SubstringSearch
 void SubstringSearch(const std::string& filename, const std::string& substring, int repetitions) {
-    const size_t BUFFER_SIZE = 8192;  // 8KB буфер, можно настроить
+    const size_t BUFFER_SIZE = 8192;  // 8KB буфер
     std::vector<char> buffer(BUFFER_SIZE);
     int totalCount = 0;
 
@@ -54,15 +54,14 @@ void SubstringSearch(const std::string& filename, const std::string& substring, 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> duration = end - start;
 
-    std::cout << "Search completed. Substring found: " << totalCount << " times.\n";
-    std::cout << "Execution time: " << duration.count() << " secs\n";
+    std::cout << "Поиск завершен. Подстрока найдена: " << totalCount << " раз.\n";
+    std::cout << "Время выполнения: " << duration.count() << " сек\n";
 }
 
-// Функция для запуска SubstringSearch с фиксированными параметрами
 void runSubstringSearchWithoutCache() {
     std::string filename = "large_text_file.txt";  // Имя файла для поиска
     std::string substring = "example";        // Подстрока для поиска
-    int repetitions = 100;                         // Количество повторений
+    int repetitions = 1;                         // Количество повторений
 
     std::cout << "Running Substring Search without Cache:\n";
     std::cout << "File: " << filename << "\n";

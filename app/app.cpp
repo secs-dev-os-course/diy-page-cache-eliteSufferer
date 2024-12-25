@@ -1,6 +1,8 @@
-//
-//
-// // // Тестовая функция
+#include <iostream>
+#include <windows.h>
+#include "SubstringSearch.h"
+#include "CacheAPI.h"
+// // Тестовая функция
 // void test_open_close() {
 //     const char* test_file = "test.txt";
 //
@@ -300,9 +302,9 @@
 //         std::cout << "Страница с offset 8192 не добавлена в кэш (Ошибка)." << std::endl;
 //     }
 // }
-
-
-
+//
+//
+//
 // int main() {
 //     SetConsoleOutputCP(CP_UTF8);
 //     test_open_close();
@@ -314,10 +316,7 @@
 //     return 0;
 // }
 
-#include <iostream>
-#include <windows.h>
 
-#include "SubstringSearch.h"
 
 int main() {
     SetConsoleOutputCP(CP_UTF8);

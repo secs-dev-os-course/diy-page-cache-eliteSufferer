@@ -1,24 +1,75 @@
-#define BUILD_DLL
 #include "CacheAPI.h"
 
 #include <windows.h>
 #include <iostream>
 #include <unordered_map>
 #include <vector>
-#include "BlockCache.h"
 #include "SubstringSearch.h"
-
-struct FileDescriptor {
-    HANDLE handle;
-    off_t offset;
-};
 
 // Таблица открытых файлов
 static std::unordered_map<int, FileDescriptor> file_table;
 static int next_fd = 1; // Следующий доступный пользовательский дескриптор
 
 constexpr size_t CACHE_SIZE = 10; // Максимальное количество страниц в кэше
-BlockCache cache(CACHE_SIZE);     // Глобальный кэш
+
+bool load_file_into_cache(int fd, off_t file_size) {
+    std::cout << "Начало загрузки файла в кэш. Размер файла: " << file_size << " байт." << std::endl;
+    auto it = file_table.find(fd);
+    if (it == file_table.end()) {
+        std::cerr << "Ошибка: некорректный дескриптор файла " << fd << std::endl;
+        return false;
+    }
+    HANDLE file_handle = it->second.handle;
+
+    off_t current_offset = 0;
+
+    while (current_offset < file_size) {
+        std::cout << "Текущий offset: " << current_offset << std::endl;
+
+        // Выравниваем смещение по границе блока
+        off_t aligned_offset = (current_offset / BLOCK_SIZE) * BLOCK_SIZE;
+        std::cout << "Чтение блока с offset: " << aligned_offset << std::endl;
+
+        // Буфер для чтения блока
+        std::vector<char> buffer(BLOCK_SIZE, 0);
+        DWORD bytes_read = 0;
+
+        // Читаем блок с диска последовательно
+        BOOL read_success = ReadFile(file_handle, buffer.data(), BLOCK_SIZE, &bytes_read, NULL);
+        if (!read_success) {
+            DWORD error = GetLastError();
+            if (error != ERROR_HANDLE_EOF) {
+                std::cerr << "Ошибка чтения файла: " << error << std::endl;
+                return false;
+            }
+        }
+
+        if (bytes_read == 0) {
+            std::cout << "Достигнут конец файла." << std::endl;
+            break; // Конец файла
+        }
+
+        // Создаем страницу кэша и добавляем её в кэш
+        auto page = std::make_shared<CachePage>(aligned_offset);
+        memcpy(page->data.data(), buffer.data(), bytes_read);
+        page->dirty = false; // Данные чистые
+        get_cache_instance().add_page(page);
+
+        std::cout << "Загружен блок в кэш: offset = " << aligned_offset << ", bytesRead = " << bytes_read << std::endl;
+        std::cout << "Текущий размер кэша: " << get_cache_instance().get_pages().size() << " страниц." << std::endl;
+
+        current_offset += bytes_read;
+        std::cout << "Обновленный offset: " << current_offset << std::endl;
+    }
+
+    std::cout << "Загрузка в кэш завершена. Общий размер кэша: " << get_cache_instance().get_pages().size() << " страниц." << std::endl;
+    return true;
+}
+
+BlockCache& get_cache_instance() {
+    static BlockCache cache(CACHE_SIZE);
+    return cache;
+}
 
 off_t get_file_size(int fd) {
     auto it = file_table.find(fd);
@@ -47,7 +98,7 @@ int lab2_open(const char* path) {
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         nullptr,
         OPEN_EXISTING,
-        FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,  // Убран FILE_FLAG_OVERLAPPED
+        FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH,
         nullptr
     );
 
@@ -127,7 +178,6 @@ off_t lab2_lseek(int fd, off_t offset, int whence) {
 }
 
 
-// Чтение данных из файла
 ssize_t lab2_read(int fd, void* buf, size_t count) {
     auto it = file_table.find(fd);
     if (it == file_table.end()) {
@@ -139,39 +189,65 @@ ssize_t lab2_read(int fd, void* buf, size_t count) {
     HANDLE file_handle = fd_struct.handle;
     off_t offset = fd_struct.offset;
 
-    // Выравниваем размер чтения только если это не последний блок
-    size_t aligned_count = count;
-    if (count % BLOCK_SIZE != 0) {
-        aligned_count = ((count + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
-    }
+    size_t bytes_to_read = count;
+    size_t bytes_read_total = 0;
+    char* buffer_ptr = static_cast<char*>(buf);
 
-    // Создаем временный буфер для выровненного чтения
-    std::vector<char> temp_buffer(aligned_count);
-    DWORD bytes_read;
+    while (bytes_to_read > 0) {
+        off_t block_offset = (offset / BLOCK_SIZE) * BLOCK_SIZE;
+        size_t offset_in_block = offset % BLOCK_SIZE;
+        size_t bytes_available_in_block = BLOCK_SIZE - offset_in_block;
+        size_t bytes_to_copy = std::min(bytes_available_in_block, bytes_to_read);
 
-    if (!ReadFile(file_handle, temp_buffer.data(), static_cast<DWORD>(aligned_count),
-                 &bytes_read, nullptr)) {
-        DWORD error = GetLastError();
-        if (error != ERROR_HANDLE_EOF) {
-            std::cerr << "Ошибка чтения файла: " << error << std::endl;
-            return -1;
+        // Попытка получить страницу из кэша
+        auto cache_page = get_cache_instance().get_page(block_offset);
+        if (cache_page) {
+            // Копирование данных из кэша
+            memcpy(buffer_ptr, cache_page->data.data() + offset_in_block, bytes_to_copy);
+            std::cout << "Чтение из кэша: offset = " << block_offset << ", bytes_to_copy = " << bytes_to_copy << std::endl;
+        } else {
+            // Чтение с диска, если страница не в кэше
+            std::cout << "Страница не найдена в кэше: offset = " << block_offset << ". Чтение с диска." << std::endl;
+
+            // Буфер для чтения блока
+            std::vector<char> temp_buffer(BLOCK_SIZE, 0);
+            DWORD bytes_read = 0;
+
+            // Читаем блок с диска
+            BOOL read_success = ReadFile(file_handle, temp_buffer.data(), BLOCK_SIZE, &bytes_read, NULL);
+            if (!read_success) {
+                DWORD error = GetLastError();
+                if (error != ERROR_HANDLE_EOF) {
+                    std::cerr << "Ошибка чтения файла: " << error << std::endl;
+                    return -1;
+                }
+            }
+
+            if (bytes_read == 0) {
+                std::cout << "Достигнут конец файла при чтении." << std::endl;
+                break; // Конец файла
+            }
+
+            // Копирование данных в буфер
+            memcpy(buffer_ptr, temp_buffer.data() + offset_in_block, bytes_to_copy);
+            std::cout << "Чтение с диска: offset = " << block_offset << ", bytes_to_copy = " << bytes_to_copy << std::endl;
+
+            // Добавление страницы в кэш
+            auto new_page = std::make_shared<CachePage>(block_offset);
+            memcpy(new_page->data.data(), temp_buffer.data(), bytes_read);
+            new_page->dirty = false;
+            get_cache_instance().add_page(new_page);
         }
-                 }
 
-    if (bytes_read == 0) {
-        return 0;
+        buffer_ptr += bytes_to_copy;
+        offset += bytes_to_copy;
+        bytes_read_total += bytes_to_copy;
+        bytes_to_read -= bytes_to_copy;
     }
 
-    // Копируем только запрошенное количество байт
-    size_t bytes_to_copy = std::min(count, static_cast<size_t>(bytes_read));
-    memcpy(buf, temp_buffer.data(), bytes_to_copy);
-
-    // Обновляем смещение в файле
-    fd_struct.offset += bytes_to_copy;
-
-    return bytes_to_copy;
+    fd_struct.offset = offset;
+    return bytes_read_total;
 }
-
 
 
 // Запись данных в файл
@@ -197,7 +273,7 @@ ssize_t lab2_write(int fd, const void* buf, size_t count) {
         size_t bytes_to_write = std::min(BLOCK_SIZE - offset_in_block, count);
 
         // Получаем или создаем страницу в кэше
-        auto page = cache.get_page(block_offset);
+        auto page = get_cache_instance().get_page(block_offset);
         if (!page) {
             page = std::make_shared<CachePage>(block_offset);
 
@@ -219,7 +295,7 @@ ssize_t lab2_write(int fd, const void* buf, size_t count) {
                bytes_to_write);
 
         page->dirty = true;
-        cache.add_page(page);
+        get_cache_instance().add_page(page);
 
         bytes_written += bytes_to_write;
         count -= bytes_to_write;
@@ -243,7 +319,7 @@ int lab2_fsync(int fd) {
     HANDLE file_handle = fd_struct.handle;
 
     // Сбрасываем все "грязные" страницы на диск
-    for (auto& [offset, page] : cache.get_pages()) {
+    for (auto& [offset, page] : get_cache_instance().get_pages()) {
         if (page->dirty) {
             OVERLAPPED overlapped = {0};
             overlapped.Offset = static_cast<DWORD>(page->offset & 0xFFFFFFFF);
@@ -269,6 +345,6 @@ int lab2_fsync(int fd) {
 
 
 int lab2_advice(int fd, off_t offset, size_t next_access_time) {
-    cache.update_access_hint(offset, next_access_time);
+    get_cache_instance().update_access_hint(offset, next_access_time);
     return 0;
 }

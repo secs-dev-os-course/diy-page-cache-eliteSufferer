@@ -1,15 +1,12 @@
-#include <bemapiset.h>
-
 #include "CacheAPI.h"
 #include <iostream>
 #include <string>
 #include <vector>
 #include <chrono>
 #include <windows.h>
-
 #include "BlockCache.h"
 
-void SubstringSearchWithCache(const std::string& filename, const std::string& substring, int repetitions) {
+void SubstringSearchUsingCache(const std::string& filename, const std::string& substring, int repetitions) {
     const size_t BUFFER_SIZE = BLOCK_SIZE;
     int totalCount = 0;
 
@@ -28,8 +25,21 @@ void SubstringSearchWithCache(const std::string& filename, const std::string& su
             return;
         }
 
-        std::cout << "Размер файла: " << file_size << " байт\n";
+        std::cout << "Итерация " << i + 1 << ": загрузка данных в кэш." << std::endl;
+        // Первый проход: загрузка данных в кэш через API
+        if (!load_file_into_cache(fd, file_size)) {
+            lab2_close(fd);
+            return;
+        }
 
+        // Сброс смещения для второго прохода
+        if (lab2_lseek(fd, 0, SEEK_SET) < 0) {
+            std::cerr << "Ошибка сброса смещения файла." << std::endl;
+            lab2_close(fd);
+            return;
+        }
+
+        // Второй проход: поиск подстроки с использованием кэша
         std::string overflow;
         int count = 0;
         off_t current_offset = 0;
@@ -49,17 +59,11 @@ void SubstringSearchWithCache(const std::string& filename, const std::string& su
                 current_block_size = last_block_size;
             }
 
-            // Устанавливаем позицию для чтения
-            if (lab2_lseek(fd, aligned_offset, SEEK_SET) < 0) {
-                std::cerr << "Ошибка позиционирования на offset " << aligned_offset << std::endl;
-                break;
-            }
-
-            // Подсказка кэшу о следующем доступе
+            // Подсказка кэшу о следующем доступе (можно адаптировать по необходимости)
             lab2_advice(fd, aligned_offset, current_offset + current_block_size);
 
-            // Читаем блок
-            std::vector<char> buffer(current_block_size);
+            // Читаем блок (будет использован кэш)
+            std::vector<char> buffer(current_block_size, 0);
             ssize_t bytesRead = lab2_read(fd, buffer.data(), current_block_size);
 
             if (bytesRead < 0) {
@@ -70,9 +74,6 @@ void SubstringSearchWithCache(const std::string& filename, const std::string& su
             if (bytesRead == 0) {
                 break;
             }
-
-            std::cout << "Прочитано " << bytesRead << " байт с позиции " << current_offset
-                      << " (aligned: " << aligned_offset << ")\n";
 
             // Формируем текущий блок с учетом overflow
             std::string currentBlock = overflow + std::string(buffer.data(), bytesRead);
@@ -102,7 +103,6 @@ void SubstringSearchWithCache(const std::string& filename, const std::string& su
             size_t pos = 0;
             while ((pos = currentBlock.find(substring, pos)) != std::string::npos) {
                 ++count;
-                std::cout << "Найдено вхождение на позиции: " << current_offset + pos << std::endl;
                 pos += 1; // Двигаемся к следующему возможному вхождению
             }
 
@@ -111,7 +111,7 @@ void SubstringSearchWithCache(const std::string& filename, const std::string& su
 
         totalCount += count;
         lab2_close(fd);
-        std::cout << "Итерация " << i + 1 << ": найдено " << count << " вхождений\n";
+        std::cout << "Итерация " << i + 1 << ": найдено " << count << " вхождений" << std::endl;
     }
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -131,5 +131,5 @@ void runSubstringSearchWithCache() {
     std::cout << "Подстрока: \"" << substring << "\"\n";
     std::cout << "Количество повторений: " << repetitions << "\n";
 
-    SubstringSearchWithCache(filename, substring, repetitions);
+    SubstringSearchUsingCache(filename, substring, repetitions);
 }
