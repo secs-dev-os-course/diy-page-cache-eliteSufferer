@@ -58,7 +58,7 @@ void BlockCache::evict_page() {
     for (const auto& [offset, page] : pages) {
         size_t access_time = access_hints.count(offset) ? access_hints[offset] : SIZE_MAX;
 
-        std::cout << "Offset: " << offset << ", Access time: " << access_time << std::endl;
+        // std::cout << "Offset: " << offset << ", Access time: " << access_time << std::endl;
 
         if (access_time < min_access_time) { // Ищем минимальный access_time
             min_access_time = access_time;

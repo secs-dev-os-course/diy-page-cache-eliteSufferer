@@ -10,8 +10,9 @@
 static std::unordered_map<int, FileDescriptor> file_table;
 static int next_fd = 1; // Следующий доступный пользовательский дескриптор
 
-constexpr size_t CACHE_SIZE = 10; // Максимальное количество страниц в кэше
+constexpr size_t CACHE_SIZE = 10000; // Максимальное количество страниц в кэше
 
+// Реализация функции загрузки файла в кэш
 bool load_file_into_cache(int fd, off_t file_size) {
     std::cout << "Начало загрузки файла в кэш. Размер файла: " << file_size << " байт." << std::endl;
     auto it = file_table.find(fd);
@@ -208,6 +209,14 @@ ssize_t lab2_read(int fd, void* buf, size_t count) {
         } else {
             // Чтение с диска, если страница не в кэше
             std::cout << "Страница не найдена в кэше: offset = " << block_offset << ". Чтение с диска." << std::endl;
+
+            // Устанавливаем указатель файла на block_offset
+            LARGE_INTEGER li;
+            li.QuadPart = block_offset;
+            if (!SetFilePointerEx(file_handle, li, NULL, FILE_BEGIN)) {
+                std::cerr << "Ошибка установки указателя файла: " << GetLastError() << std::endl;
+                return -1;
+            }
 
             // Буфер для чтения блока
             std::vector<char> temp_buffer(BLOCK_SIZE, 0);
